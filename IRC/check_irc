@@ -1,0 +1,138 @@
+#!/usr/bin/perl
+###############
+## HackThisSite IRC Checker
+##
+## By Kage
+## http://www.hackthissite.org
+##
+##  Copyright (c) 2012 Kage, HackThisSite.org
+##
+##  Redistribution and use in source and binary forms, with or without
+##  modification, are permitted provided that the following conditions
+##  are met:
+##  1. Redistributions of source code must retain the above copyright
+##     notice, this list of conditions and the following disclaimer.
+##  2. Redistributions in binary form must reproduce the above copyright
+##     notice, this list of conditions and the following disclaimer in the
+##     documentation and/or other materials provided with the distribution.
+##
+##  THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+##  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+##  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+##  ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
+##  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+##  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+##  OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+##  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+##  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+##  OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+##  SUCH DAMAGE.
+##
+
+use strict;
+use JSON;
+use Getopt::Long;
+use vars qw($opt_d $opt_t $opt_w $opt_c);
+use vars qw($PROGNAME);
+use lib "/usr/local/libexec/nagios";
+use utils qw(%ERRORS);
+
+# Get runtime options
+
+Getopt::Long::Configure('bundling');
+GetOptions(
+   "d=s" => \$opt_d,	"data=s"	=> \$opt_d,	# Data file path
+   "t=i" => \$opt_t,	"time=i"	=> \$opt_t,	# Maximum age (sec) of data file
+   "w=i" => \$opt_w,	"warning=i"	=> \$opt_w,	# Users online warning
+   "c=i" => \$opt_c,	"critical=i"	=> \$opt_c,	# Users online critical
+);
+
+($opt_d) || ($opt_d = shift @ARGV) || nagiosExit($ERRORS{'UNKNOWN'}, 'Data file path not specified');
+my $datafile = $1 if ($opt_d =~ /([-.\/ A-Za-z0-9]+)/);
+($datafile && -r $datafile) || nagiosExit($ERRORS{'UNKNOWN'}, 'Data file not readable');
+
+($opt_t) || ($opt_t = shift @ARGV) || ($opt_t = 180);
+my $maxage = $1 if ($opt_t =~ /^([0-9]+)$/);
+($maxage) || nagiosExit($ERRORS{'UNKNOWN'}, 'Invalid maximum age number: '.$opt_t);
+
+($opt_w) || ($opt_w = shift @ARGV) || ($opt_w = 80);
+my $warn = $1 if ($opt_w =~ /^([0-9]+)$/);
+($warn) || nagiosExit($ERRORS{'UNKNOWN'}, 'Invalid warning threshold: '.$opt_w);
+
+($opt_c) || ($opt_c = shift @ARGV) || ($opt_c = 100);
+my $crit = $1 if ($opt_c =~ /^([0-9]+)$/);
+($crit) || nagiosExit($ERRORS{'UNKNOWN'}, 'Invalid critical threshold: '.$opt_c);
+
+($warn < $crit) || nagiosExit($ERRORS{'UNKNOWN'}, 'Warning threshold must be less than critical threshold');
+
+# Fetch JSON file
+
+open NAGIOS, '<'.$datafile or nagiosExit($ERRORS{'UNKNOWN'}, 'Cannot open data file: '.$!);
+my @jsonArr = <NAGIOS>;
+close NAGIOS;
+my $jsonStr = join '', @jsonArr;
+my $json = from_json($jsonStr);
+
+# Check thresholds
+
+my $state = $ERRORS{'OK'}; # Start off ok
+my $output = '';
+
+my $time = $json->{'time'};
+my $diff = (time()-$time);
+nagiosExit($ERRORS{'CRITICAL'}, 'Data file older than '.$maxage.' seconds ('.$diff.'s)') if ($diff > $maxage);
+$output .= 'Data file '.$diff.'s old ;;; ';
+
+my $online = $json->{'online'};
+$state = $ERRORS{'WARNING'} if ($online >= $warn);
+$state = $ERRORS{'CRITICAL'} if ($online >= $crit);
+$output .= 'Users';
+$output .= ' ('.($online >= $crit ? 'CRIT' : 'WARN').')' if ($online >= $warn || $online >= $crit);
+$output .= ': '.$online.' ;;; ';
+
+my (@botOn, @botOff);
+while (my($bot, $status) = each %{$json->{'bots'}}) {
+  if ($status) {
+    push @botOn, $bot;
+  } else {
+    push @botOff, $bot;
+  }
+}
+$state = $ERRORS{'WARNING'} if (scalar @botOff && $state < $ERRORS{'CRITICAL'});
+$output .= 'Bots: ';
+$output .= '[OFF: '.join(', ', @botOff).'] ' if (scalar @botOff);
+$output .= join(', ', @botOn).' ;;; ';
+
+my (%nodeOn, @nodeOff);
+while (my($node, $status) = each %{$json->{'nodes'}}) {
+  if ($status != -1) {
+    $nodeOn{$node} = $status;
+  } else {
+    push @nodeOff, $node;
+  }
+}
+$state = $ERRORS{'CRITICAL'} if (scalar @nodeOff);
+$output .= 'Nodes: ';
+$output .= '[OFF: '.join(', ', @nodeOff).'] ' if (scalar @nodeOff);
+my $nodesOn = '';
+while (my($node, $count) = each %nodeOn) {
+  $nodesOn .= $node.' ('.$count.'), ';
+}
+$output .= substr($nodesOn,0,-2);
+
+# Output
+
+nagiosExit();
+
+###
+
+sub nagiosExit {
+  ($state, $output) = @_ if ((scalar @_));
+  my $status = '[';
+  if ($state == $ERRORS{'OK'}) { $status .= 'OK'; }
+  elsif ($state == $ERRORS{'WARNING'}) { $status .= 'WARNING'; }
+  elsif ($state == $ERRORS{'CRITICAL'}) { $status .= 'CRITICAL'; }
+  else { $status .= 'ERROR'; }
+  print $status.'] '.$output."\n";
+  exit $state;
+}

@@ -1,0 +1,158 @@
+#!/usr/bin/perl
+###############
+## HackThisSite Check Nodes
+##
+## By Kage
+## http://www.hackthissite.org
+##
+##  Copyright (c) 2013 Kage, HackThisSite.org
+##
+##  Redistribution and use in source and binary forms, with or without
+##  modification, are permitted provided that the following conditions
+##  are met:
+##  1. Redistributions of source code must retain the above copyright
+##     notice, this list of conditions and the following disclaimer.
+##  2. Redistributions in binary form must reproduce the above copyright
+##     notice, this list of conditions and the following disclaimer in the
+##     documentation and/or other materials provided with the distribution.
+##
+##  THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+##  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+##  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+##  ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
+##  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+##  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+##  OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+##  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+##  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+##  OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+##  SUCH DAMAGE.
+##
+
+use strict;
+use WWW::Curl::Easy;
+use WWW::Curl::Multi;
+use HTTP::Status;
+use Time::HiRes qw(gettimeofday time tv_interval);
+use Regexp::Common qw /net URI/;
+use Getopt::Long;
+use vars qw($opt_h $opt_i $opt_p $opt_S $opt_u $opt_s);
+use vars qw($PROGNAME);
+use lib "/usr/lib/nagios/plugins";
+use utils qw(%ERRORS);
+
+# Get runtime options
+
+Getopt::Long::Configure('bundling');
+GetOptions(
+  "h=s" => \$opt_h,     "host=s"        => \$opt_h,     # Hostname
+  "i=s" => \$opt_i,     "ip=s"          => \$opt_i,     # IP Address (or comma-delimited list)
+  "p=i" => \$opt_p,     "proto=i"       => \$opt_p,     # Protocol (4 or 6)
+  "S"   => \$opt_S,     "schema"        => \$opt_S,     # Use SSL
+  "u=s" => \$opt_u,     "uri=s"         => \$opt_u,     # URI
+  "s=s" => \$opt_s,     "string=s"      => \$opt_s,     # Expected String
+);
+
+# Hostname
+($opt_h) || ($opt_h = shift @ARGV) || nagiosExit($ERRORS{'UNKNOWN'}, 'Hostname not specified');
+my $host = $opt_h;
+
+# IP address(es)
+($opt_i) || ($opt_i = shift @ARGV) || nagiosExit($ERRORS{'UNKNOWN'}, 'IP address/list not specified');
+my @ipaddrs = split(/,/, $opt_i);
+foreach (@ipaddrs) {
+  nagiosExit($ERRORS{'UNKNOWN'}, 'Invalid IP address(es) in list') unless ($_ =~ m/^$RE{net}{IPv4}$/ || $_ =~ m/^$RE{net}{IPv6}$/);
+}
+
+# Protocol
+($opt_p) || ($opt_p = shift @ARGV) || ($opt_p = 4);
+my $proto = $1 if ($opt_p =~ /^([46])$/);
+($proto) || nagiosExit($ERRORS{'UNKNOWN'}, 'Unknown protocol: '.$opt_p);
+
+# SSL
+my $ssl = $opt_S;
+
+# URI
+($opt_u) || ($opt_u = shift @ARGV) || nagiosExit($ERRORS{'UNKNOWN'}, 'URI not specified');
+my $fullurl = 'http'.($ssl?'s':'').'://'.$host.$opt_u;
+my $uri = $opt_u if ($fullurl =~ /^$RE{URI}{HTTP}{-scheme=>'https?'}{-keep}$/ && $3 eq $host);
+($uri) || nagiosExit($ERRORS{'UNKNOWN'}, 'Invalid URI: '.$opt_u);
+
+# String
+($opt_s) || ($opt_s = shift @ARGV) || nagiosExit($ERRORS{'UNKNOWN'}, 'Expected string not specified');
+my $string = $opt_s;
+
+## Do work, son!
+
+my $state = $ERRORS{'OK'}; # Start off ok
+my @outokarr;
+my @outerrarr;
+
+my %curle;
+my $curlm = WWW::Curl::Multi->new;
+my $active = 0;
+sub chunk { my ($data,$pointer)=@_; ${$pointer}.=$data; return length($data) }
+foreach my $ip (@ipaddrs) {
+  $active++;
+  $curle{$active}{ts} = [gettimeofday];
+  $curle{$active}{ip} = $ip;
+  my $curl = WWW::Curl::Easy->new;
+  $curle{$active}{ref} = $curl;
+  $curle{$active}{body} = '';
+  $curl->setopt(CURLOPT_PRIVATE, $active);
+  $curl->setopt(CURLOPT_TIMEOUT, 9);
+  $curl->setopt(CURLOPT_CONNECTTIMEOUT, 9);
+  $curl->setopt(CURLOPT_WRITEFUNCTION, \&chunk);
+  $curl->setopt(CURLOPT_WRITEDATA, \$curle{$active}{body});
+  if ($ssl) { $curl->setopt(CURLOPT_SSL_VERIFYHOST, 0); }
+  $curl->setopt(CURLOPT_URL, 'http'.($ssl?'s':'').'://'.($ip =~ m/^$RE{net}{IPv6}$/ ? '['.$ip.']' : $ip).$uri);
+  $curl->setopt(CURLOPT_HTTPHEADER, ['Host: '.$host]);
+  $curlm->add_handle($curl);
+}
+
+while ($active) {
+  my $transfers = $curlm->perform;
+  if ($transfers != $active) {
+    while (my($id,$retval) = $curlm->info_read) {
+      if ($id) {
+        $active--;
+        if ($retval == 0) {
+          my $done = [gettimeofday];
+          my $elapsed = sprintf("%.4f", tv_interval($curle{$id}{ts}, $done));
+          my $httpcode = $curle{$id}{ref}->getinfo(CURLINFO_HTTP_CODE);
+          if (!is_info($httpcode) && !is_error($httpcode)) {
+            if ($curle{$id}{body} !~ m/$string/g) {
+              $state = $ERRORS{'WARNING'} if ($state < $ERRORS{'CRITICAL'});
+              push @outokarr, $curle{$id}{ip}.': FAIL (String mistmatch; '.$httpcode.' '.status_message($httpcode).', '.$elapsed.'s)';
+            } else {
+              push @outokarr, $curle{$id}{ip}.': OK ('.$httpcode.' '.status_message($httpcode).', '.$elapsed.'s)';
+            }
+          } else {
+            if (is_client_error($httpcode)) { $state = $ERRORS{'WARNING'} if ($state < $ERRORS{'CRITICAL'}); }
+            if (is_server_error($httpcode)) { $state = $ERRORS{'CRITICAL'}; }
+            push @outokarr, $curle{$id}{ip}.': FAIL ('.$httpcode.' '.status_message($httpcode).', '.$elapsed.'s)';
+          }
+        } else {
+          $state = $ERRORS{'CRITICAL'};
+          push @outerrarr, $curle{$id}{ip}.': FAIL (E'.$retval.' - '.$curle{$id}{ref}->errbuf.')';
+        }
+        delete $curle{$id};
+      }
+    }
+  }
+}
+
+nagiosExit($state, 'Checked '.($ssl ? 'SSL ' : '').$host.' on '.($#ipaddrs+1).' nodes ('.($#outokarr+1).' OK, '.($#outerrarr+1).' Fail): '.(@outerrarr ? join(', ', @outerrarr).' - ' : '').join(', ', @outokarr));
+
+###
+
+sub nagiosExit {
+  my ($state, $output) = @_ if ((scalar @_));
+  my $status = '[';
+  if ($state == $ERRORS{'OK'}) { $status .= 'OK'; }
+  elsif ($state == $ERRORS{'WARNING'}) { $status .= 'WARNING'; }
+  elsif ($state == $ERRORS{'CRITICAL'}) { $status .= 'CRITICAL'; }
+  else { $status .= 'ERROR'; }
+  print $status.'] '.$output."\n";
+  exit $state;
+}

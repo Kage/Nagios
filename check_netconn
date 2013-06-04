@@ -1,0 +1,101 @@
+#!/usr/bin/perl
+###############
+## HackThisSite Network Connections Check
+##
+## By Kage
+## http://www.hackthissite.org
+##
+##  Copyright (c) 2013 Kage, HackThisSite.org
+##
+##  Redistribution and use in source and binary forms, with or without
+##  modification, are permitted provided that the following conditions
+##  are met:
+##  1. Redistributions of source code must retain the above copyright
+##     notice, this list of conditions and the following disclaimer.
+##  2. Redistributions in binary form must reproduce the above copyright
+##     notice, this list of conditions and the following disclaimer in the
+##     documentation and/or other materials provided with the distribution.
+##
+##  THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+##  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+##  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+##  ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
+##  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+##  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+##  OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+##  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+##  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+##  OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+##  SUCH DAMAGE.
+##
+
+use strict;
+use Net::CIDR::Lite;
+use Getopt::Long;
+use vars qw($opt_d $opt_t $opt_w $opt_c);
+use vars qw($PROGNAME);
+use lib "/usr/local/libexec/nagios";
+use utils qw(%ERRORS);
+
+# Get runtime options
+
+Getopt::Long::Configure('bundling');
+GetOptions(
+   "w=i" => \$opt_w, "warning=i"  => \$opt_w,
+   "c=i" => \$opt_c, "critical=i" => \$opt_c,
+);
+
+($opt_w) || ($opt_w = shift @ARGV) || ($opt_w = 200);
+my $warn = $1 if ($opt_w =~ /^([0-9]+)$/);
+($warn) || nagiosExit($ERRORS{'UNKNOWN'}, 'Invalid warning threshold: '.$opt_w);
+
+($opt_c) || ($opt_c = shift @ARGV) || ($opt_c = 400);
+my $crit = $1 if ($opt_c =~ /^([0-9]+)$/);
+($crit) || nagiosExit($ERRORS{'UNKNOWN'}, 'Invalid critical threshold: '.$opt_c);
+
+($warn < $crit) || nagiosExit($ERRORS{'UNKNOWN'}, 'Warning threshold must be less than critical threshold');
+
+my $cidr = Net::CIDR::Lite->new;
+$cidr->add('1.2.3.4/26');
+$cidr->add('5.6.7.8/27');
+$cidr->add('10.0.0.0/8');
+$cidr->clean();
+
+my $netstat = `netstat -n -f inet | awk '{print \$5}' | egrep '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | cut -f1-4 -d'.'`;
+
+my $ignored = 0;
+my $count = 0;
+
+foreach my $ip (split(/\n/, $netstat)) {
+  if ($cidr->find($ip)) {
+    $ignored++;
+  } else {
+    $count++;
+  }
+}
+
+# Check thresholds
+
+my $state = $ERRORS{'OK'}; # Start off ok
+
+$state = $ERRORS{'WARNING'} if ($count >= $opt_w && $state < $ERRORS{'CRITICAL'});
+$state = $ERRORS{'CRITICAL'} if ($count >= $opt_c);
+
+# Output
+
+my $output = 'Network Connections: '.$count.' ('.$ignored.' ignored)';
+
+nagiosExit();
+
+###
+
+sub nagiosExit {
+  ($state, $output) = @_ if ((scalar @_));
+  my $status = '[';
+  if ($state == $ERRORS{'OK'}) { $status .= 'OK'; }
+  elsif ($state == $ERRORS{'WARNING'}) { $status .= 'WARNING'; }
+  elsif ($state == $ERRORS{'CRITICAL'}) { $status .= 'CRITICAL'; }
+  else { $status .= 'ERROR'; }
+  print $status.'] '.$output."\n";
+  exit $state;
+}
