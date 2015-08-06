@@ -5,6 +5,9 @@
 ## By Kage
 ## http://www.hackthissite.org
 ##
+## Because HTS uses multiple web nodes behind a load-balancer, this script is
+## used to perform functionality checks on each node to ensure responsiveness.
+##
 ##  Copyright (c) 2013 Kage, HackThisSite.org
 ##
 ##  Redistribution and use in source and binary forms, with or without

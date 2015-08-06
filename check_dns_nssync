@@ -1,0 +1,79 @@
+#!/bin/bash
+###############
+## HackThisSite Check DNS NameServer Synchronization
+##
+## By Kage
+## http://www.hackthissite.org
+##
+## Based on dnsreport by FrankB@FrankB.us
+## This script checks that all nameservers attached to a domain report the
+## same up-to-date records based on matching SOA.
+##
+##  Copyright (c) 2013 Kage, HackThisSite.org
+##
+##  Redistribution and use in source and binary forms, with or without
+##  modification, are permitted provided that the following conditions
+##  are met:
+##  1. Redistributions of source code must retain the above copyright
+##     notice, this list of conditions and the following disclaimer.
+##  2. Redistributions in binary form must reproduce the above copyright
+##     notice, this list of conditions and the following disclaimer in the
+##     documentation and/or other materials provided with the distribution.
+##
+##  THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+##  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+##  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+##  ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
+##  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+##  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+##  OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+##  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+##  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+##  OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+##  SUCH DAMAGE.
+##
+
+. /usr/lib/nagios/plugins/utils.sh
+
+if [ ! $1 ]; then
+  echo "ERROR: Must supply a domain name!"
+  exit $STATE_CRITICAL;
+fi
+
+DOMAIN=$1
+
+master_server=`/usr/bin/dig $DOMAIN soa | grep SOA | grep -v "^;" | awk '{print substr($5,0,length($5)-1)}'`
+master_serial_dig=`/usr/bin/dig @$master_server $DOMAIN soa`;
+if [ $? -ne 0 ]; then
+  echo "CRITICAL: Cannot fetch SOA from master server $master_server"
+  exit $STATE_CRITICAL;
+fi
+master_serial=`echo "$master_serial_dig" | grep SOA | grep -v "^;" | awk '{print $7}'`
+nameserver_list=`/usr/bin/dig @$master_server $DOMAIN ns | grep NS | grep -v "^;" | awk '{print substr($5,0,length($5)-1)}' | tr '\n' ' '`
+ns_badlist=""
+ns_goodlist=""
+for server in $nameserver_list; do
+  serial=`/usr/bin/dig @$server $DOMAIN soa 2>&1 | grep SOA | grep -v "^;" | awk '{print $7}'`
+  if [ -z $serial ]; then
+    if [ -u /usr/bin/fping ]; then
+      ns_badlist="$ns_badlist `fping $server 2>&1`"
+    else
+      ns_badlist="$ns_badlist $server"
+    fi
+  elif [ $master_serial = $serial ]; then
+    ns_goodlist="$ns_goodlist $server ($serial)"
+  else
+    ns_badlist="$ns_badlist $server ($serial)"
+  fi
+done
+
+ns_badlist=`echo $ns_badlist | sed 's/^[ \t]*//'`
+ns_goodlist=`echo $ns_goodlist | sed 's/^[ \t]*//'`
+
+if [ -n "$ns_badlist" ]; then
+  echo "CRITICAL: Bad DNS Serial Sync: $master_server ($master_serial) -- Out Of Sync: $ns_badlist -- Synchronized: $ns_goodlist"
+  exit $STATE_CRITICAL;
+else
+  echo "OK: DNS Serials Synchronized: $master_server ($master_serial) -- $ns_goodlist"
+  exit $STATE_OK;
+fi

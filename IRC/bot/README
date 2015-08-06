@@ -1,0 +1,6 @@
+The easiest way to run this script is by using the `daemon` daemonizer
+(installed by default in FreeBSD).  ProtoIRC for some reason does not
+like to work with other methods of daemonization (causes extreme
+memory leaks and lockups).  Invoke as follows:
+
+$ daemon -p bot.pid /usr/local/bin/php nagios.php

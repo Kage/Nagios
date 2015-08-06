@@ -1,0 +1,79 @@
+#!/usr/local/bin/bash
+###############
+## HackThisSite Check Power Supply
+##
+## By Kage
+## http://www.hackthissite.org
+##
+## Uses a modified version of https://www.thomas-krenn.com/de/wiki/IPMI_Sensor_Monitoring_Plugin
+## That plugin only checks presence and health of power supplies, but doesn't tell you if one of
+## the PSUs is offline (e.g. power failure), which is necessary for multi-circuit redundancy.
+## This plugin provides that additional check.
+##
+##  Copyright (c) 2013 Kage, HackThisSite.org
+##
+##  Redistribution and use in source and binary forms, with or without
+##  modification, are permitted provided that the following conditions
+##  are met:
+##  1. Redistributions of source code must retain the above copyright
+##     notice, this list of conditions and the following disclaimer.
+##  2. Redistributions in binary form must reproduce the above copyright
+##     notice, this list of conditions and the following disclaimer in the
+##     documentation and/or other materials provided with the distribution.
+##
+##  THIS SOFTWARE IS PROVIDED BY AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+##  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+##  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+##  ARE DISCLAIMED.  IN NO EVENT SHALL AUTHOR OR CONTRIBUTORS BE LIABLE
+##  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+##  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+##  OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+##  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+##  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+##  OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+##  SUCH DAMAGE.
+##
+
+#
+# Set to number of minimum active power supplies allowed
+#
+
+PSU_AMOUNT=2
+
+
+#
+#
+
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin
+
+PROGNAME=`basename $0`
+PROGPATH=`echo $0 | sed -e 's,[\\/][^\\/][^\\/]*$,,'`
+REVISION=""
+
+. $PROGPATH/utils.sh
+
+
+
+CHECKPSU=`$PROGPATH/check_ipmi_sensor -H localhost -o zenoss -O '--legacy-output --interpret-oem-data' -T "Power Supply"`
+EXITCODE=$?
+
+if [ $EXITCODE != 0 ]; then
+  echo $CHECKPSU
+  exit $EXITCODE
+fi
+
+psucount=0
+for line in $CHECKPSU; do
+  checkline=`echo $line | grep 'Power_Supply'`
+  if [ -n "$checkline" ]; then
+    psucount=`expr $psucount + 1`
+  fi
+done
+
+if [ $psucount -lt $PSU_AMOUNT ]; then
+  echo "CRITICAL: Power supply presence less than $PSU_AMOUNT"
+  exit $STATE_CRITICAL
+else
+  echo $CHECKPSU
+  exit $EXITCODE
+fi
